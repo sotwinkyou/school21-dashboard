@@ -7,6 +7,23 @@ from icalendar import Calendar
 from datetime import datetime
 import io
 import time
+import zipfile
+
+# --- ПРЕДОТВРАЩЕНИЕ ОШИБОК СТИЛЕЙ (MONKEYPATCH OPENPYXL) ---
+try:
+    import openpyxl.reader.excel
+    orig_read_style = openpyxl.reader.excel.ExcelReader.read_style
+    def safe_read_style(self):
+        try:
+            orig_read_style(self)
+        except Exception:
+            # Безопасные дефолты при критической ошибке XML-стилей Яндекса
+            self.shared_styles = []
+            self.stylesheet = None
+    openpyxl.reader.excel.ExcelReader.read_style = safe_read_style
+except Exception:
+    pass
+
 import openpyxl
 
 # Настройки страницы Streamlit
@@ -120,19 +137,41 @@ def download_from_yandex(public_url):
     except Exception as e:
         return None, f"Ошибка подключения к Яндексу: {str(e)}"
 
+# --- ХИРУРГИЧЕСКОЕ УДАЛЕНИЕ СТИЛЕЙ ИЗ XLSX-АРХИВА ---
+def strip_styles_from_xlsx(file_bytes):
+    """
+    Удаляет файл стилей xl/styles.xml из zip-архива xlsx.
+    Это на 100% решает проблему с поломанными XML-стилями Яндекса.
+    """
+    try:
+        in_mem_zip = io.BytesIO(file_bytes)
+        out_mem_zip = io.BytesIO()
+        with zipfile.ZipFile(in_mem_zip, 'r') as yin:
+            with zipfile.ZipFile(out_mem_zip, 'w', zipfile.ZIP_DEFLATED) as yout:
+                for item in yin.infolist():
+                    # Полностью вырезаем стили, провоцирующие падение openpyxl
+                    if item.filename == 'xl/styles.xml':
+                        continue
+                    yout.writestr(item, yin.read(item.filename))
+        return out_mem_zip.getvalue()
+    except Exception:
+        return file_bytes
+
 # --- ФУНКЦИИ УМНОГО ПАРСИНГА ФАЙЛОВ ---
 def parse_excel(file_bytes):
     """
-    Парсинг Excel с обходом ошибок стилей (read_only=True)
+    Парсинг Excel с предварительной очисткой от проблемных стилей
     """
     try:
-        # Используем openpyxl в read_only режиме для игнорирования XML-стилей Яндекса
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        # Очищаем байты файла от XML-стилей Яндекса перед загрузкой
+        sanitized_bytes = strip_styles_from_xlsx(file_bytes)
+        
+        # Загружаем очищенную версию таблицы в безопасном read_only режиме
+        wb = openpyxl.load_workbook(io.BytesIO(sanitized_bytes), read_only=True, data_only=True)
         sheet = wb.active
         
         data = []
         for row in sheet.iter_rows(values_only=True):
-            # Пропускаем пустые строки полностью
             if any(cell is not None for cell in row):
                 data.append(list(row))
         
@@ -143,7 +182,7 @@ def parse_excel(file_bytes):
         headers = [str(h).strip() if h is not None else f"Column_{i}" for i, h in enumerate(data[0])]
         df = pd.DataFrame(data[1:], columns=headers)
         
-        # Умное приведение названий колонок (игнорируем регистр и лишние пробелы)
+        # Умный маппинг колонок (игнорирует регистр букв и пробелы)
         column_mapping = {}
         for col in df.columns:
             col_lower = col.lower()
@@ -160,7 +199,7 @@ def parse_excel(file_bytes):
                 
         df = df.rename(columns=column_mapping)
         
-        # Оставляем только нужные колонки, отсутствующие заполняем пустыми значениями
+        # Убедимся, что все 5 колонок присутствуют в результирующей таблице
         required_cols = ["Название", "Дата", "Время", "Место", "Участники"]
         for rc in required_cols:
             if rc not in df.columns:
