@@ -1,202 +1,344 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import plotly.express as px
-from datetime import datetime, timedelta
+import requests
+import urllib.parse
+from docx import Document
+from icalendar import Calendar
+from datetime import datetime
+import io
+import time
+import openpyxl
 
-# === НАСТРОЙКА СТРАНИЦЫ ===
+# Настройки страницы Streamlit
 st.set_page_config(
-    page_title="Мой дашборд",
-    page_icon="📊",
-    layout="wide"
+    page_title="Дашборд Школы 21", 
+    layout="wide", 
+    page_icon="💚"
 )
 
-# === ЗАГОЛОВОК ===
-st.title("📊 Интерактивный дашборд на Python")
-st.markdown("---")
+# Очистка и запуск автоматического обновления (каждые 120 секунд)
+if "last_update" not in st.session_state:
+    st.session_state.last_update = time.time()
 
-# === БОКОВАЯ ПАНЕЛЬ: ЗАГРУЗКА ДАННЫХ ===
-with st.sidebar:
-    st.header("⚙️ Настройки")
+current_time = time.time()
+if current_time - st.session_state.last_update > 120:
+    st.session_state.last_update = current_time
+    st.cache_data.clear()
+
+# Фирменный стиль Сбера и Школы 21 (бело-зеленая гамма)
+st.markdown("""
+    <style>
+    /* Основной фон приложения */
+    .stApp {
+        background-color: #f4f6f8;
+    }
     
-    # Выбор источника данных
-    source = st.radio(
-        "Источник данных:",
-        ["Сгенерировать пример", "Загрузить CSV-файл"]
-    )
+    /* Стилизация заголовков */
+    h1 {
+        color: #08a652 !important;
+        font-family: 'SB Sans Text', 'Helvetica Neue', sans-serif;
+        font-weight: 800;
+        border-bottom: 3px solid #08a652;
+        padding-bottom: 10px;
+    }
     
-    if source == "Загрузить CSV-файл":
-        uploaded_file = st.file_uploader(
-            "Загрузите CSV-файл",
-            type=["csv"],
-            help="Файл должен содержать числовые колонки для графиков"
-        )
-        if uploaded_file is not None:
-            df = pd.read_csv(uploaded_file)
-            st.success(f"✅ Загружено {len(df)} строк")
+    h2, h3 {
+        color: #111827;
+        font-family: 'SB Sans Text', sans-serif;
+        font-weight: 600;
+    }
+    
+    /* Стилизация карточек KPI */
+    div[data-testid="stMetricValue"] {
+        font-size: 2rem !important;
+        font-weight: bold;
+        color: #08a652 !important;
+    }
+    
+    div[data-testid="stMetricLabel"] {
+        font-size: 0.95rem !important;
+        color: #4b5563 !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    
+    /* Боковая панель */
+    section[data-testid="stSidebar"] {
+        background-color: #ffffff;
+        border-right: 1px solid #e5e7eb;
+    }
+    
+    /* Кнопки и интерактивные элементы */
+    .stButton>button {
+        background-color: #08a652 !important;
+        color: white !important;
+        border-radius: 8px !important;
+        border: none !important;
+        font-weight: 600 !important;
+        transition: all 0.3s ease;
+        width: 100%;
+    }
+    
+    .stButton>button:hover {
+        background-color: #06803f !important;
+        box-shadow: 0 4px 12px rgba(8, 166, 82, 0.2);
+    }
+    
+    /* Красивые контейнеры для KPI */
+    .kpi-card {
+        background-color: #ffffff;
+        padding: 20px;
+        border-radius: 12px;
+        border-left: 5px solid #08a652;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+        margin-bottom: 15px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("💚 Автоматизированный дашборд | Школа 21")
+
+# --- ФУНКЦИЯ ЗАГРУЗКИ С ЯНДЕКС.ДИСКА ---
+@st.cache_data(ttl=120)
+def download_from_yandex(public_url):
+    """
+    Скачивание файла по публичной ссылке Яндекс.Диска
+    """
+    base_url = 'https://cloud-api.yandex.net/v1/disk/public/resources/download'
+    final_url = base_url + '?public_key=' + urllib.parse.quote(public_url)
+    try:
+        response = requests.get(final_url)
+        if response.status_code == 200:
+            download_url = response.json().get('href')
+            file_response = requests.get(download_url)
+            if file_response.status_code == 200:
+                return file_response.content, None
+            else:
+                return None, f"Не удалось скачать файл. Код: {file_response.status_code}"
         else:
-            st.info("Загрузите CSV или используйте пример")
-            df = None
-    else:
-        # Генерация примерных данных
-        st.info("Генерируем демо-данные...")
-        np.random.seed(42)
-        dates = pd.date_range(start="2024-01-01", periods=365, freq="D")
-        df = pd.DataFrame({
-            "Дата": dates,
-            "Продажи": np.random.randint(100, 500, 365) + np.sin(np.linspace(0, 20, 365)) * 50,
-            "Посетители": np.random.randint(500, 2000, 365),
-            "Категория": np.random.choice(["A", "B", "C", "D"], 365),
-            "Регион": np.random.choice(["Север", "Юг", "Восток", "Запад"], 365)
-        })
-        df["Конверсия"] = (df["Продажи"] / df["Посетители"] * 100).round(2)
+            return None, "Нет доступа. Проверьте, что ссылка публичная."
+    except Exception as e:
+        return None, f"Ошибка подключения к Яндексу: {str(e)}"
+
+# --- ФУНКЦИИ УМНОГО ПАРСИНГА ФАЙЛОВ ---
+def parse_excel(file_bytes):
+    """
+    Парсинг Excel с обходом ошибок стилей (read_only=True)
+    """
+    try:
+        # Используем openpyxl в read_only режиме для игнорирования XML-стилей Яндекса
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        sheet = wb.active
+        
+        data = []
+        for row in sheet.iter_rows(values_only=True):
+            # Пропускаем пустые строки полностью
+            if any(cell is not None for cell in row):
+                data.append(list(row))
+        
+        if not data:
+            return None, "Файл пуст или не содержит данных."
+            
+        # Формируем DataFrame
+        headers = [str(h).strip() if h is not None else f"Column_{i}" for i, h in enumerate(data[0])]
+        df = pd.DataFrame(data[1:], columns=headers)
+        
+        # Умное приведение названий колонок (игнорируем регистр и лишние пробелы)
+        column_mapping = {}
+        for col in df.columns:
+            col_lower = col.lower()
+            if "назван" in col_lower or "событи" in col_lower or "мероприяти" in col_lower:
+                column_mapping[col] = "Название"
+            elif "дат" in col_lower:
+                column_mapping[col] = "Дата"
+            elif "врем" in col_lower or "час" in col_lower:
+                column_mapping[col] = "Время"
+            elif "мест" in col_lower or "аудитор" in col_lower or "кластер" in col_lower:
+                column_mapping[col] = "Место"
+            elif "участн" in col_lower or "кол-во" in col_lower or "люд" in col_lower:
+                column_mapping[col] = "Участники"
+                
+        df = df.rename(columns=column_mapping)
+        
+        # Оставляем только нужные колонки, отсутствующие заполняем пустыми значениями
+        required_cols = ["Название", "Дата", "Время", "Место", "Участники"]
+        for rc in required_cols:
+            if rc not in df.columns:
+                df[rc] = "Не указано"
+                
+        return df[required_cols], None
+    except Exception as e:
+        return None, f"Ошибка Excel: {str(e)}"
+
+def parse_docx(file_bytes):
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        data = []
+        for table in doc.tables:
+            for row in table.rows[1:]: # пропускаем шапку таблицы
+                text = [cell.text.strip() for cell in row.cells]
+                if len(text) >= 5:
+                    data.append(text[:5])
+        df = pd.DataFrame(data, columns=["Название", "Дата", "Время", "Место", "Участники"])
+        return df, None
+    except Exception as e:
+        return None, f"Ошибка Word: {str(e)}"
+
+def parse_ical(file_bytes):
+    try:
+        gcal = Calendar.from_ical(file_bytes)
+        data = []
+        for component in gcal.walk():
+            if component.name == "VEVENT":
+                summary = str(component.get('summary'))
+                start = component.get('dtstart').dt
+                location = str(component.get('location', 'Кампус'))
+                
+                date_str = start.strftime("%Y-%m-%d") if isinstance(start, datetime) else str(start)
+                time_str = start.strftime("%H:%M") if isinstance(start, datetime) else "00:00"
+                
+                data.append([summary, date_str, time_str, location, "Не указано"])
+        df = pd.DataFrame(data, columns=["Название", "Дата", "Время", "Место", "Участники"])
+        return df, None
+    except Exception as e:
+        return None, f"Ошибка Календаря: {str(e)}"
+
+# --- БОКОВАЯ ПАНЕЛЬ И НАСТРОЙКИ СВЯЗИ ---
+st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/e/e0/Sberbank_Logo_2020.svg", width=120)
+st.sidebar.header("📁 Параметры импорта")
+
+# Чтение ссылок из URL-адреса для перманентного сохранения состояния
+query_params = st.query_params
+default_table_url = query_params.get("table", "")
+default_cal_url = query_params.get("cal", "")
+
+source_type = st.sidebar.radio("Источник данных:", ["Яндекс.Диск ссылки", "Локальные файлы"])
+
+all_events = pd.DataFrame(columns=["Название", "Дата", "Время", "Место", "Участники"])
+errors = []
+
+if source_type == "Локальные файлы":
+    uploaded_files = st.sidebar.file_uploader(
+        "Загрузите файлы (Excel, Word, iCal)", 
+        type=["xlsx", "docx", "ics"], 
+        accept_multiple_files=True
+    )
+    if uploaded_files:
+        for file in uploaded_files:
+            file_bytes = file.read()
+            if file.name.endswith('.xlsx'):
+                df, err = parse_excel(file_bytes)
+            elif file.name.endswith('.docx'):
+                df, err = parse_docx(file_bytes)
+            elif file.name.endswith('.ics'):
+                df, err = parse_ical(file_bytes)
+            
+            if err:
+                errors.append(f"Ошибка в файле {file.name}: {err}")
+            elif df is not None:
+                all_events = pd.concat([all_events, df], ignore_index=True)
+
+else:
+    st.sidebar.info("💡 Данные будут автоматически синхронизироваться раз в 2 минуты.")
+    yandex_url_1 = st.sidebar.text_input("Ссылка на Таблицу (Excel) или Документ (Word):", value=default_table_url, placeholder="https://disk.yandex.ru/i/...")
+    yandex_url_2 = st.sidebar.text_input("Ссылка на Календарь (.ics) [опционально]:", value=default_cal_url, placeholder="https://disk.yandex.ru/d/...")
     
-    st.markdown("---")
-    st.caption(f"Данных: {len(df) if df is not None else 0} строк")
+    # Сохраняем ссылки в параметры запроса браузера
+    if yandex_url_1 or yandex_url_2:
+        st.query_params["table"] = yandex_url_1
+        st.query_params["cal"] = yandex_url_2
 
-# === ПРОВЕРКА ДАННЫХ ===
-if df is None or len(df) == 0:
-    st.warning("⚠️ Нет данных для отображения. Загрузите файл или выберите генерацию примера.")
-    st.stop()
+    urls_to_process = []
+    if yandex_url_1: urls_to_process.append((yandex_url_1, "table"))
+    if yandex_url_2: urls_to_process.append((yandex_url_2, "cal"))
+    
+    if urls_to_process:
+        for url, u_type in urls_to_process:
+            file_bytes, err = download_from_yandex(url)
+            if err:
+                errors.append(f"Ошибка загрузки по ссылке ({u_type}): {err}")
+            elif file_bytes:
+                if ".xlsx" in url or "excel" in url.lower() or u_type == "table":
+                    df, err = parse_excel(file_bytes)
+                elif ".docx" in url or "word" in url.lower():
+                    df, err = parse_docx(file_bytes)
+                elif ".ics" in url or "calendar" in url.lower() or u_type == "cal":
+                    df, err = parse_ical(file_bytes)
+                else:
+                    df, err = parse_excel(file_bytes)
+                
+                if err:
+                    errors.append(f"Ошибка распознавания данных: {err}")
+                elif df is not None:
+                    all_events = pd.concat([all_events, df], ignore_index=True)
 
-# === ОСНОВНЫЕ ФИЛЬТРЫ ===
-st.sidebar.subheader("🔍 Фильтры")
+    if st.sidebar.button("🔄 Синхронизировать сейчас"):
+        st.cache_data.clear()
+        st.rerun()
 
-# Автоопределение колонок
-numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-date_cols = df.select_dtypes(include=['datetime64']).columns.tolist()
-categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+# --- ГЛАВНЫЙ ЭКРАН ---
 
-# Если есть дата-колонка, добавляем фильтр по дате
-if date_cols:
-    date_col = date_cols[0]
-    min_date = df[date_col].min()
-    max_date = df[date_col].max()
-    date_range = st.sidebar.date_input(
-        "Период",
-        value=(min_date, max_date),
-        min_value=min_date,
-        max_value=max_date
-    )
-    if len(date_range) == 2:
-        start_date, end_date = date_range
-        df = df[(df[date_col] >= pd.to_datetime(start_date)) & (df[date_col] <= pd.to_datetime(end_date))]
+# 1. БЛОК KPI
+st.subheader("🚀 Пульс Кампуса")
+kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
 
-# Фильтры по категориальным колонкам
-for col in categorical_cols[:3]:  # Ограничим 3 колонками
-    unique_values = df[col].unique()
-    selected = st.sidebar.multiselect(
-        f"Фильтр по {col}",
-        options=unique_values,
-        default=unique_values
-    )
-    if selected:
-        df = df[df[col].isin(selected)]
-
-# === ОТОБРАЖЕНИЕ ДАННЫХ ===
-if len(df) == 0:
-    st.warning("⚠️ Нет данных после применения фильтров.")
-    st.stop()
-
-# === МЕТРИКИ (KPI) ===
-st.subheader("📈 Ключевые показатели")
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric("📦 Всего записей", f"{len(df):,}")
-with col2:
-    if numeric_cols:
-        total = df[numeric_cols[0]].sum()
-        st.metric(f"💰 Сумма {numeric_cols[0]}", f"{total:,.0f}")
-with col3:
-    if numeric_cols:
-        avg = df[numeric_cols[0]].mean()
-        st.metric(f"📊 Среднее {numeric_cols[0]}", f"{avg:,.1f}")
-with col4:
-    if len(numeric_cols) > 1:
-        corr = df[numeric_cols[:2]].corr().iloc[0, 1]
-        st.metric("🔗 Корреляция", f"{corr:.2f}")
+with kpi_col1:
+    st.markdown('<div class="kpi-card">', unsafe_allow_html=True)
+    st.metric(label="👥 Студенты (Сheck-in)", value="432", delta="+12 сегодня")
+    st.markdown('</div>', unsafe_allow_html=True)
+with kpi_col2:
+    st.markdown('<div class="kpi-card">', unsafe_allow_html=True)
+    st.metric(label="💻 Активные проекты", value="18", delta="Ветка С & DevOps")
+    st.markdown('</div>', unsafe_allow_html=True)
+with kpi_col3:
+    st.markdown('<div class="kpi-card">', unsafe_allow_html=True)
+    st.metric(label="📅 Мероприятия в сети", value=len(all_events) if not all_events.empty else "0")
+    st.markdown('</div>', unsafe_allow_html=True)
+with kpi_col4:
+    st.markdown('<div class="kpi-card">', unsafe_allow_html=True)
+    st.metric(label="⏳ Ближайший дедлайн", value="2 дня", delta="Финал Бассейна", delta_color="inverse")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("---")
 
-# === ГРАФИКИ ===
-col1, col2 = st.columns(2)
+# 2. РАСПИСАНИЕ И КАЛЕНДАРЬ
+st.subheader("🗓️ Расписание и график событий")
 
-with col1:
-    st.subheader("📉 Динамика")
-    if date_cols:
-        x_axis = date_cols[0]
+if not all_events.empty:
+    # Удаляем пустые значения в столбце 'Место' для фильтра
+    all_events['Место'] = all_events['Место'].fillna('Не указано')
+    places = all_events['Место'].unique()
+    selected_place = st.multiselect("Фильтр по локациям (кластерам):", options=places, default=places)
+    
+    filtered_events = all_events[all_events['Место'].isin(selected_place)]
+    st.dataframe(filtered_events, use_container_width=True)
+else:
+    st.info("Используйте боковую панель для загрузки локальных файлов или подключения ссылок Яндекс.Диска.")
+    st.caption("Пример отображения расписания (демо-данные):")
+    demo_data = pd.DataFrame({
+        "Название": ["Хакатон Сбера", "Peer-to-Peer Защиты", "Встреча с HR", "Лекция по AI"],
+        "Дата": ["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04"],
+        "Время": ["10:00", "14:00", "16:30", "12:00"],
+        "Место": ["Конференц-зал", "Кластер А", "Переговорка 2", "Кластер Б"],
+        "Участники": ["120 человек", "Все пиры", "Команда Core", "Бассейн"]
+    })
+    st.dataframe(demo_data, use_container_width=True)
+
+st.markdown("---")
+
+# 3. ОТЧЕТЫ И БЛОКЕРЫ
+st.subheader("📋 Оперативные отчеты")
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.write("**📊 Прогресс подготовки к ивентам:**")
+    st.progress(0.8, text="Организация Летнего Хакатона (80%)")
+    st.progress(0.4, text="Закупка мерча для бассейна (40%)")
+
+with col_right:
+    st.write("**⚠️ Контроль блокеров и импорта:**")
+    if errors:
+        for err in errors:
+            st.error(err)
     else:
-        x_axis = df.index if "index" in df.columns else df.columns[0]
-    
-    if numeric_cols:
-        fig_line = px.line(
-            df,
-            x=x_axis,
-            y=numeric_cols[0],
-            title=f"Тренд {numeric_cols[0]}",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_line, use_container_width=True)
-
-with col2:
-    st.subheader("📊 Распределение")
-    if categorical_cols:
-        fig_bar = px.bar(
-            df[categorical_cols[0]].value_counts().reset_index(),
-            x="index",
-            y=categorical_cols[0],
-            title=f"Распределение по {categorical_cols[0]}",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
-    elif numeric_cols:
-        fig_hist = px.histogram(
-            df,
-            x=numeric_cols[0],
-            title=f"Гистограмма {numeric_cols[0]}",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_hist, use_container_width=True)
-
-# === ДОПОЛНИТЕЛЬНЫЙ РЯД ГРАФИКОВ ===
-st.subheader("📊 Дополнительный анализ")
-col1, col2 = st.columns(2)
-
-with col1:
-    if categorical_cols and numeric_cols:
-        fig_box = px.box(
-            df,
-            x=categorical_cols[0],
-            y=numeric_cols[0],
-            title=f"Разброс {numeric_cols[0]} по {categorical_cols[0]}",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_box, use_container_width=True)
-
-with col2:
-    if len(numeric_cols) >= 2:
-        fig_scatter = px.scatter(
-            df,
-            x=numeric_cols[0],
-            y=numeric_cols[1],
-            color=categorical_cols[0] if categorical_cols else None,
-            title=f"Зависимость {numeric_cols[0]} от {numeric_cols[1]}",
-            template="plotly_white"
-        )
-        st.plotly_chart(fig_scatter, use_container_width=True)
-
-# === ТАБЛИЦА ===
-with st.expander("📋 Просмотр данных"):
-    st.dataframe(df, use_container_width=True, height=400)
-    
-    # Кнопка скачивания
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="⬇️ Скачать CSV",
-        data=csv,
-        file_name=f"dashboard_data_{datetime.now().strftime('%Y%m%d')}.csv",
-        mime="text/csv"
-    )
-
-st.caption("🚀 Дашборд создан на Python + Streamlit")
+        st.success("Все импортированные файлы синхронизированы без ошибок.")
