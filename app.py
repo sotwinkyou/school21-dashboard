@@ -7,6 +7,7 @@ from icalendar import Calendar
 from datetime import datetime
 import io
 import time
+import openpyxl
 
 # Настройки страницы Streamlit
 st.set_page_config(
@@ -14,6 +15,15 @@ st.set_page_config(
     layout="wide", 
     page_icon="💚"
 )
+
+# Очистка и запуск автоматического обновления (каждые 120 секунд)
+if "last_update" not in st.session_state:
+    st.session_state.last_update = time.time()
+
+current_time = time.time()
+if current_time - st.session_state.last_update > 120:
+    st.session_state.last_update = current_time
+    st.cache_data.clear()
 
 # Фирменный стиль Сбера и Школы 21 (бело-зеленая гамма)
 st.markdown("""
@@ -66,6 +76,7 @@ st.markdown("""
         border: none !important;
         font-weight: 600 !important;
         transition: all 0.3s ease;
+        width: 100%;
     }
     
     .stButton>button:hover {
@@ -87,12 +98,11 @@ st.markdown("""
 
 st.title("💚 Автоматизированный дашборд | Школа 21")
 
-# Кешируем запросы к Яндекс.Диску ровно на 2 минуты (120 секунд). 
-# По истечении этого времени Streamlit автоматически сделает новый запрос к Яндексу, чтобы забрать свежие данные.
+# --- ФУНКЦИЯ ЗАГРУЗКИ С ЯНДЕКС.ДИСКА ---
 @st.cache_data(ttl=120)
 def download_from_yandex(public_url):
     """
-    Использует публичное API Яндекс.Диска для получения прямой ссылки на скачивание файла.
+    Скачивание файла по публичной ссылке Яндекс.Диска
     """
     base_url = 'https://cloud-api.yandex.net/v1/disk/public/resources/download'
     final_url = base_url + '?public_key=' + urllib.parse.quote(public_url)
@@ -104,16 +114,59 @@ def download_from_yandex(public_url):
             if file_response.status_code == 200:
                 return file_response.content, None
             else:
-                return None, f"Не удалось скачать файл. Код ошибки: {file_response.status_code}"
+                return None, f"Не удалось скачать файл. Код: {file_response.status_code}"
         else:
-            return None, "Не удалось получить доступ к файлу. Проверьте, что ссылка публичная."
+            return None, "Нет доступа. Проверьте, что ссылка публичная."
     except Exception as e:
-        return None, f"Ошибка подключения к Яндекс.Диску: {str(e)}"
+        return None, f"Ошибка подключения к Яндексу: {str(e)}"
 
+# --- ФУНКЦИИ УМНОГО ПАРСИНГА ФАЙЛОВ ---
 def parse_excel(file_bytes):
+    """
+    Парсинг Excel с обходом ошибок стилей (read_only=True)
+    """
     try:
-        df = pd.read_excel(io.BytesIO(file_bytes))
-        return df, None
+        # Используем openpyxl в read_only режиме для игнорирования XML-стилей Яндекса
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        sheet = wb.active
+        
+        data = []
+        for row in sheet.iter_rows(values_only=True):
+            # Пропускаем пустые строки полностью
+            if any(cell is not None for cell in row):
+                data.append(list(row))
+        
+        if not data:
+            return None, "Файл пуст или не содержит данных."
+            
+        # Формируем DataFrame
+        headers = [str(h).strip() if h is not None else f"Column_{i}" for i, h in enumerate(data[0])]
+        df = pd.DataFrame(data[1:], columns=headers)
+        
+        # Умное приведение названий колонок (игнорируем регистр и лишние пробелы)
+        column_mapping = {}
+        for col in df.columns:
+            col_lower = col.lower()
+            if "назван" in col_lower or "событи" in col_lower or "мероприяти" in col_lower:
+                column_mapping[col] = "Название"
+            elif "дат" in col_lower:
+                column_mapping[col] = "Дата"
+            elif "врем" in col_lower or "час" in col_lower:
+                column_mapping[col] = "Время"
+            elif "мест" in col_lower or "аудитор" in col_lower or "кластер" in col_lower:
+                column_mapping[col] = "Место"
+            elif "участн" in col_lower or "кол-во" in col_lower or "люд" in col_lower:
+                column_mapping[col] = "Участники"
+                
+        df = df.rename(columns=column_mapping)
+        
+        # Оставляем только нужные колонки, отсутствующие заполняем пустыми значениями
+        required_cols = ["Название", "Дата", "Время", "Место", "Участники"]
+        for rc in required_cols:
+            if rc not in df.columns:
+                df[rc] = "Не указано"
+                
+        return df[required_cols], None
     except Exception as e:
         return None, f"Ошибка Excel: {str(e)}"
 
@@ -122,7 +175,7 @@ def parse_docx(file_bytes):
         doc = Document(io.BytesIO(file_bytes))
         data = []
         for table in doc.tables:
-            for row in table.rows[1:]: 
+            for row in table.rows[1:]: # пропускаем шапку таблицы
                 text = [cell.text.strip() for cell in row.cells]
                 if len(text) >= 5:
                     data.append(text[:5])
@@ -140,24 +193,26 @@ def parse_ical(file_bytes):
                 summary = str(component.get('summary'))
                 start = component.get('dtstart').dt
                 location = str(component.get('location', 'Кампус'))
+                
                 date_str = start.strftime("%Y-%m-%d") if isinstance(start, datetime) else str(start)
                 time_str = start.strftime("%H:%M") if isinstance(start, datetime) else "00:00"
+                
                 data.append([summary, date_str, time_str, location, "Не указано"])
         df = pd.DataFrame(data, columns=["Название", "Дата", "Время", "Место", "Участники"])
         return df, None
     except Exception as e:
         return None, f"Ошибка Календаря: {str(e)}"
 
-# Считываем ссылки из адресной строки (чтобы они не стирались при обновлении страницы)
-saved_url_1 = st.query_params.get("table", "")
-saved_url_2 = st.query_params.get("calendar", "")
-
-# --- БОКОВАЯ ПАНЕЛЬ ---
+# --- БОКОВАЯ ПАНЕЛЬ И НАСТРОЙКИ СВЯЗИ ---
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/e/e0/Sberbank_Logo_2020.svg", width=120)
-st.sidebar.header("📁 Импорт данных")
+st.sidebar.header("📁 Параметры импорта")
 
-# Выбор источника данных
-source_type = st.sidebar.radio("Выберите источник данных:", ["Яндекс.Диск ссылки", "Локальные файлы"])
+# Чтение ссылок из URL-адреса для перманентного сохранения состояния
+query_params = st.query_params
+default_table_url = query_params.get("table", "")
+default_cal_url = query_params.get("cal", "")
+
+source_type = st.sidebar.radio("Источник данных:", ["Яндекс.Диск ссылки", "Локальные файлы"])
 
 all_events = pd.DataFrame(columns=["Название", "Дата", "Время", "Место", "Участники"])
 errors = []
@@ -184,59 +239,44 @@ if source_type == "Локальные файлы":
                 all_events = pd.concat([all_events, df], ignore_index=True)
 
 else:
-    st.sidebar.info("💡 Убедитесь, что ваши ссылки публичные. После ввода ссылок добавьте страницу в Закладки, чтобы не вставлять их повторно!")
+    st.sidebar.info("💡 Данные будут автоматически синхронизироваться раз в 2 минуты.")
+    yandex_url_1 = st.sidebar.text_input("Ссылка на Таблицу (Excel) или Документ (Word):", value=default_table_url, placeholder="https://disk.yandex.ru/i/...")
+    yandex_url_2 = st.sidebar.text_input("Ссылка на Календарь (.ics) [опционально]:", value=default_cal_url, placeholder="https://disk.yandex.ru/d/...")
     
-    # Текстовые поля с авто-заполнением из адресной строки
-    yandex_url_1 = st.sidebar.text_input(
-        "Ссылка на Таблицу (Excel) или Документ (Word):", 
-        value=saved_url_1,
-        placeholder="https://disk.yandex.ru/i/..."
-    )
-    yandex_url_2 = st.sidebar.text_input(
-        "Ссылка на Календарь (.ics) [опционально]:", 
-        value=saved_url_2,
-        placeholder="https://disk.yandex.ru/d/..."
-    )
-    
-    # Сохраняем новые ссылки в адресную строку браузера при изменении
-    if yandex_url_1 != saved_url_1:
+    # Сохраняем ссылки в параметры запроса браузера
+    if yandex_url_1 or yandex_url_2:
         st.query_params["table"] = yandex_url_1
-    if yandex_url_2 != saved_url_2:
-        st.query_params["calendar"] = yandex_url_2
+        st.query_params["cal"] = yandex_url_2
 
-    # Кнопка для мгновенного принудительного обновления (сброс кеша)
-    st.sidebar.markdown("---")
-    if st.sidebar.button("🔄 Синхронизировать сейчас"):
-        st.cache_data.clear()  # Полностью очищаем кеш
-        st.toast("Кэш очищен! Загружаем самые свежие версии с Яндекс.Диска...", icon="📥")
-        time.sleep(1)
-        st.rerun()
-
-    urls_to_process = [u for u in [yandex_url_1, yandex_url_2] if u]
+    urls_to_process = []
+    if yandex_url_1: urls_to_process.append((yandex_url_1, "table"))
+    if yandex_url_2: urls_to_process.append((yandex_url_2, "cal"))
     
     if urls_to_process:
-        with st.sidebar.spinner("Подключение к Яндекс.Диску..."):
-            for idx, url in enumerate(urls_to_process):
-                file_bytes, err = download_from_yandex(url)
+        for url, u_type in urls_to_process:
+            file_bytes, err = download_from_yandex(url)
+            if err:
+                errors.append(f"Ошибка загрузки по ссылке ({u_type}): {err}")
+            elif file_bytes:
+                if ".xlsx" in url or "excel" in url.lower() or u_type == "table":
+                    df, err = parse_excel(file_bytes)
+                elif ".docx" in url or "word" in url.lower():
+                    df, err = parse_docx(file_bytes)
+                elif ".ics" in url or "calendar" in url.lower() or u_type == "cal":
+                    df, err = parse_ical(file_bytes)
+                else:
+                    df, err = parse_excel(file_bytes)
+                
                 if err:
-                    errors.append(f"Ошибка загрузки (Ссылка #{idx+1}): {err}")
-                elif file_bytes:
-                    # Пытаемся автоматически определить тип по структуре / ссылке
-                    if ".xlsx" in url or "excel" in url.lower() or idx == 0 and not url.endswith('.docx'):
-                        df, err = parse_excel(file_bytes)
-                    elif ".docx" in url or "word" in url.lower():
-                        df, err = parse_docx(file_bytes)
-                    elif ".ics" in url or "calendar" in url.lower():
-                        df, err = parse_ical(file_bytes)
-                    else:
-                        df, err = parse_excel(file_bytes)
-                        if err:
-                            df, err = parse_docx(file_bytes)
-                    
-                    if err:
-                        errors.append(f"Не удалось распознать формат по ссылке #{idx+1}: {err}")
-                    elif df is not None:
-                        all_events = pd.concat([all_events, df], ignore_index=True)
+                    errors.append(f"Ошибка распознавания данных: {err}")
+                elif df is not None:
+                    all_events = pd.concat([all_events, df], ignore_index=True)
+
+    if st.sidebar.button("🔄 Синхронизировать сейчас"):
+        st.cache_data.clear()
+        st.rerun()
+
+# --- ГЛАВНЫЙ ЭКРАН ---
 
 # 1. БЛОК KPI
 st.subheader("🚀 Пульс Кампуса")
@@ -252,16 +292,12 @@ with kpi_col2:
     st.markdown('</div>', unsafe_allow_html=True)
 with kpi_col3:
     st.markdown('<div class="kpi-card">', unsafe_allow_html=True)
-    st.metric(label="📅 Мероприятия", value=len(all_events) if not all_events.empty else "12")
+    st.metric(label="📅 Мероприятия в сети", value=len(all_events) if not all_events.empty else "0")
     st.markdown('</div>', unsafe_allow_html=True)
 with kpi_col4:
     st.markdown('<div class="kpi-card">', unsafe_allow_html=True)
     st.metric(label="⏳ Ближайший дедлайн", value="2 дня", delta="Финал Бассейна", delta_color="inverse")
     st.markdown('</div>', unsafe_allow_html=True)
-
-# Информационный блок о времени последнего обновления
-current_time = datetime.now().strftime("%H:%M:%S")
-st.caption(f"⏱️ Автоматическое обновление данных с Яндекс.Диска включено (каждые 2 минуты). Последняя синхронизация страницы: **{current_time}**.")
 
 st.markdown("---")
 
@@ -269,6 +305,8 @@ st.markdown("---")
 st.subheader("🗓️ Расписание и график событий")
 
 if not all_events.empty:
+    # Удаляем пустые значения в столбце 'Место' для фильтра
+    all_events['Место'] = all_events['Место'].fillna('Не указано')
     places = all_events['Место'].unique()
     selected_place = st.multiselect("Фильтр по локациям (кластерам):", options=places, default=places)
     
@@ -280,7 +318,7 @@ else:
     demo_data = pd.DataFrame({
         "Название": ["Хакатон Сбера", "Peer-to-Peer Защиты", "Встреча с HR", "Лекция по AI"],
         "Дата": ["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04"],
-        "Time": ["10:00", "14:00", "16:30", "12:00"],
+        "Время": ["10:00", "14:00", "16:30", "12:00"],
         "Место": ["Конференц-зал", "Кластер А", "Переговорка 2", "Кластер Б"],
         "Участники": ["120 человек", "Все пиры", "Команда Core", "Бассейн"]
     })
